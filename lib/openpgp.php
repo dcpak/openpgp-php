@@ -5,7 +5,7 @@
  * (RFC 4880).
  *
  * @package OpenPGP
- * @version 0.0.1
+ * @version 0.0.2
  * @author  Arto Bendiken <arto.bendiken@gmail.com>
  * @author  Stephen Paul Weber <singpolyma@singpolyma.net>
  * @see     http://github.com/bendiken/openpgp-php
@@ -418,13 +418,13 @@ class OpenPGP_Packet {
     $packet = NULL;
     if (strlen($input) > 0) {
       $parser = ord($input[0]) & 64 ? 'parse_new_format' : 'parse_old_format';
-      list($tag, $head_length, $data_length) = self::$parser($input);
+      list($tag, $head_length, $data_length, $body_data, $body_data_length) = self::$parser($input);
       $input = substr($input, $head_length);
       if ($tag && ($class = self::class_for($tag))) {
         $packet = new $class();
         $packet->tag    = $tag;
-        $packet->input  = substr($input, 0, $data_length);
-        $packet->length = $data_length;
+        $packet->input  = $body_data == null ? substr($input, 0, $data_length) : $body_data;
+        $packet->length = $body_data_length == null ? $data_length : $body_data_length;
         $packet->read();
         unset($packet->input);
         unset($packet->length);
@@ -443,16 +443,51 @@ class OpenPGP_Packet {
     $tag = ord($input[0]) & 63;
     $len = ord($input[1]);
     if($len < 192) { // One octet length
-      return array($tag, 2, $len);
+      return array($tag, 2, $len, null, null);
     }
     if($len > 191 && $len < 224) { // Two octet length
-      return array($tag, 3, (($len - 192) << 8) + ord($input[2]) + 192);
+      return array($tag, 3, (($len - 192) << 8) + ord($input[2]) + 192, null, null);
+    }
+    if($len > 223 && $len < 255) { // Partial body lengths
+      $packet_length = 1 << ($len & 0x1F);
+      $head_length = 2;
+      $offset = $head_length + $packet_length;
+      $body_data = substr($input, $head_length, $packet_length);
+      $segment_length = 0;
+      while(true) {
+        if(ord($input[$offset]) < 192) {
+          $segment_length = ord($input[$offset++]);
+          $packet_length += $segment_length;
+          $body_data .= substr($input, $offset, $segment_length);
+          $offset += $segment_length;
+          break;
+        } elseif(ord($input[$offset]) >= 192 && ord($input[$offset]) < 224) {
+          $segment_length = ((ord($input[$offset++]) - 192) << 8) + (ord($input[$offset++])) + 192;
+          $packet_length += $segment_length;
+          $body_data .= substr($input, $offset, $segment_length);
+          $offset += $segment_length;
+          break;
+        } elseif(ord($input[$offset]) > 223 && ord($input[$offset]) < 255) {
+          $segment_length = 1 << (ord($input[$offset++]) & 0x1F);
+          $packet_length += $segment_length;
+          $body_data .= substr($input, $offset, $segment_length);
+          $offset += $segment_length;
+        } else {
+          $offset++;
+          $segment_length = (ord($input[$offset++]) << 24) | (ord($input[$offset++]) << 16) | (ord($input[$offset++]) << 8) | ord($input[$offset++]);
+          $body_data .= substr($input, $offset, $segment_length);
+          $packet_length += $segment_length;
+          $offset += $segment_length;
+          break;
+        }
+      }
+      $real_packet_length = $offset - $head_length;
+      return array($tag, $head_length, $real_packet_length, $body_data, $packet_length);
     }
     if($len == 255) { // Five octet length
       $unpacked = unpack('N', substr($input, 2, 4));
-      return array($tag, 6, reset($unpacked));
+      return array($tag, 6, reset($unpacked), null, null);
     }
-    // TODO: Partial body lengths. 1 << ($len & 0x1F)
   }
 
   /**
@@ -483,7 +518,7 @@ class OpenPGP_Packet {
         $data_length = strlen($input) - $head_length;
         break;
     }
-    return array($tag, $head_length, $data_length);
+    return array($tag, $head_length, $data_length, null, null);
   }
 
   function __construct($data=NULL) {
@@ -1833,4 +1868,4 @@ class OpenPGP_ModificationDetectionCodePacket extends OpenPGP_Packet {
  *
  * @see http://tools.ietf.org/html/rfc4880#section-4.3
  */
-class OpenPGP_ExperimentalPacket extends OpenPGP_Packet {}
+class OpenPGP_ExperimentalPacket extends OpenPGP_Packet {} 
